@@ -20,6 +20,7 @@ typedef struct {
     uint32_t prefix;       // Network address
     uint8_t length;        // Prefix length (0-32)
     char cidr[32];         // Original CIDR string (for output)
+    int is_auxiliary;      // Flag to indicate if this is an auxiliary prefix
 } PrefixEntry;
 
 PrefixEntry table[MAX_TABLE_SIZE];
@@ -42,6 +43,7 @@ void parse_cidr(const char* cidr_str, PrefixEntry* entry) {
 
     entry->prefix = mask_prefix(ip, prefix_len);
     entry->length = prefix_len;
+    entry->is_auxiliary = 0;
     snprintf(entry->cidr, sizeof(entry->cidr), "%s", cidr_str);
 }
 
@@ -56,25 +58,68 @@ int compare_prefixes(const void* a, const void* b) {
     return (pa->prefix > pb->prefix) - (pa->prefix < pb->prefix);
 }
 
-// Binary Prefix Search
-const char* binary_prefix_search(uint32_t ip) {
-    int left = 0, right = table_size - 1;
-    const char* best_match = NULL;
+// Check if a prefix matches IP
+int match(uint32_t ip, uint32_t prefix, uint8_t length) {
+    return mask_prefix(ip, length) == prefix;
+}
 
-    while (left <= right) {
-        int mid = (left + right) / 2;
-        uint32_t masked = mask_prefix(ip, table[mid].length);
+// Insert auxiliary prefix (e.g., mid points) for full tree expansion
+void insert_auxiliary_prefix(uint32_t prefix, uint8_t length, const char* source_cidr) {
+    if (table_size >= MAX_TABLE_SIZE) return;
+    table[table_size].prefix = prefix;
+    table[table_size].length = length;
+    table[table_size].is_auxiliary = 1;
+    snprintf(table[table_size].cidr, sizeof(table[table_size].cidr), "%s (aux)", source_cidr);
+    table_size++;
+}
 
-        if (masked == table[mid].prefix) {
-            best_match = table[mid].cidr; // LPM preferred due to sorting
-            left = mid + 1; // Continue searching right for longer matches
-        } else if (ip < table[mid].prefix) {
-            right = mid - 1;
-        } else {
-            left = mid + 1;
-        }
+// Full tree expansion & merge logic
+void full_tree_expand_and_merge() {
+    int original_size = table_size;
+    for (int i = 0; i < original_size; i++) {
+        uint32_t prefix = table[i].prefix;
+        uint8_t length = table[i].length;
+
+        // Calculate number of child prefixes (2^(32 - length))
+        uint32_t range = 1U << (32 - length);
+        if (length == 32) continue;
+
+        // Step size for generating auxiliary prefixes (binary midpoint splitting)
+        uint32_t step = range >> 1;
+
+        // Generate one auxiliary prefix from the middle
+        uint32_t aux_prefix = prefix + step;
+        insert_auxiliary_prefix(mask_prefix(aux_prefix, length + 1), length + 1, table[i].cidr);
     }
-    return best_match;
+}
+
+// Binary Prefix Search with enclosure handling
+const char* binary_prefix_search_enclosure(uint32_t ip, int L, int R) {
+    if (L == R) {
+        if (match(ip, table[L].prefix, table[L].length)) {
+            return table[L].cidr;
+        }
+        return NULL;
+    }
+    if (L + 1 == R) {
+        if (table[L].length >= table[R].length) {
+            if (match(ip, table[L].prefix, table[L].length)) return table[L].cidr;
+            if (match(ip, table[R].prefix, table[R].length)) return table[R].cidr;
+        } else {
+            if (match(ip, table[R].prefix, table[R].length)) return table[R].cidr;
+            if (match(ip, table[L].prefix, table[L].length)) return table[L].cidr;
+        }
+        return NULL; // default port fallback could be added here
+    }
+
+    int M = (L + R) / 2;
+    if (match(ip, table[M].prefix, table[M].length)) {
+        return table[M].cidr;
+    } else if (ip < table[M].prefix) {
+        return binary_prefix_search_enclosure(ip, L, M);
+    } else {
+        return binary_prefix_search_enclosure(ip, M, R);
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -126,6 +171,8 @@ int main(int argc, char* argv[]) {
     }
     fclose(fp);
 
+    full_tree_expand_and_merge();
+
     qsort(table, table_size, sizeof(PrefixEntry), compare_prefixes);
 
     uint32_t query_ip;
@@ -136,7 +183,7 @@ int main(int argc, char* argv[]) {
     query_ip = ntohl(query_ip);
 
     begin = rdtsc();
-    const char* result = binary_prefix_search(query_ip);
+    const char* result = binary_prefix_search_enclosure(query_ip, 0, table_size - 1);
     if (result) {
         printf("Matched prefix: %s\n", result);
     } else {
