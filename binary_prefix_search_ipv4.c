@@ -7,6 +7,15 @@
 #define MAX_LINE_LEN 64
 #define MAX_TABLE_SIZE 1000000
 
+/* To calculate execution time.*/
+static __inline__ unsigned long long rdtsc(void)
+{
+  unsigned hi, lo;
+  __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+  return ( (unsigned long long)lo)|( ((unsigned long long)hi)<<32 );
+}
+/* Calculate execution time end.*/
+
 typedef struct {
     uint32_t prefix;       // Network address
     uint8_t length;        // Prefix length (0-32)
@@ -74,6 +83,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    unsigned long long int begin, end;
+
     FILE* fp = fopen(argv[1], "r");
     if (!fp) {
         perror("Failed to open routing table");
@@ -124,12 +135,15 @@ int main(int argc, char* argv[]) {
     }
     query_ip = ntohl(query_ip);
 
+    begin = rdtsc();
     const char* result = binary_prefix_search(query_ip);
     if (result) {
         printf("Matched prefix: %s\n", result);
     } else {
         printf("No match found.\n");
     }
+    end = rdtsc();
+    printf("Execution time: %llu cycles\n", end - begin);
 
     return 0;
 }

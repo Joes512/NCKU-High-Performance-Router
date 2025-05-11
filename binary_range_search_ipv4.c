@@ -7,6 +7,15 @@
 #define MAX_LINE_LEN 64
 #define MAX_TABLE_SIZE 1000000
 
+/* To calculate execution time.*/
+static __inline__ unsigned long long rdtsc(void)
+{
+  unsigned hi, lo;
+  __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+  return ( (unsigned long long)lo)|( ((unsigned long long)hi)<<32 );
+}
+/* Calculate execution time end.*/
+
 typedef struct {
     uint32_t b_minus_1;
     uint32_t f;
@@ -63,6 +72,9 @@ const char* binary_range_search(uint32_t ip) {
 }
 
 int main(int argc, char* argv[]) {
+
+    unsigned long long int begin, end;
+
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <routing_table.txt> <ip>\n", argv[0]);
         return 1;
@@ -122,12 +134,16 @@ int main(int argc, char* argv[]) {
     query_ip = ntohl(query_ip);
 
     // Run the BRS
+    begin = rdtsc();
     const char* result = binary_range_search(query_ip);
     if (result) {
         printf("Matched prefix: %s\n", result);
     } else {
         printf("No match found.\n");
     }
+    end = rdtsc();
+
+    printf("Execution time: %llu cycles\n", end - begin);
 
     return 0;
 }
