@@ -3,19 +3,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_LINE_LEN 64
 #define MAX_TABLE_SIZE 1000000
 
-/* To calculate execution time.*/
-static __inline__ unsigned long long rdtsc(void)
-{
-  unsigned hi, lo;
-  __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
-  return ( (unsigned long long)lo)|( ((unsigned long long)hi)<<32 );
+/* To calculate execution time. */
+static __inline__ unsigned long long rdtsc(void) {
+    unsigned hi, lo;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)lo) | (((unsigned long long)hi) << 32);
 }
-/* Calculate execution time end.*/
 
+/* Data structure for binary range search. */
 typedef struct {
     uint32_t b_minus_1;
     uint32_t f;
@@ -25,7 +25,7 @@ typedef struct {
 RangeEntry table[MAX_TABLE_SIZE];
 int table_size = 0;
 
-// Convert CIDR to range (b-1, f].
+// Convert CIDR to range (b-1, f]
 void parse_cidr(const char* cidr_str, RangeEntry* entry) {
     char ip_str[INET_ADDRSTRLEN];
     int prefix_len;
@@ -44,14 +44,14 @@ void parse_cidr(const char* cidr_str, RangeEntry* entry) {
     snprintf(entry->cidr, sizeof(entry->cidr), "%s", cidr_str);
 }
 
-// Sort function for qsort
+// Compare function for qsort
 int compare_entries(const void* a, const void* b) {
     uint32_t a_b1 = ((RangeEntry*)a)->b_minus_1;
     uint32_t b_b1 = ((RangeEntry*)b)->b_minus_1;
     return (a_b1 > b_b1) - (a_b1 < b_b1);
 }
 
-// Binary Range Search
+// Binary range search
 const char* binary_range_search(uint32_t ip) {
     int left = 0, right = table_size - 1;
     const char* best_match = NULL;
@@ -72,15 +72,15 @@ const char* binary_range_search(uint32_t ip) {
 }
 
 int main(int argc, char* argv[]) {
-
-    unsigned long long int begin, end;
+    unsigned long long insert_total = 0;
+    unsigned long long build_begin, build_end;
+    unsigned long long search_total = 0;
 
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <routing_table.txt> <ip>\n", argv[0]);
         return 1;
     }
 
-    // Read routing table from file
     FILE* fp = fopen(argv[1], "r");
     if (!fp) {
         perror("Failed to open routing table");
@@ -89,6 +89,8 @@ int main(int argc, char* argv[]) {
 
     char line[MAX_LINE_LEN];
     int line_number = 0;
+
+    build_begin = rdtsc();
     while (fgets(line, sizeof(line), fp)) {
         line_number++;
         if (table_size >= MAX_TABLE_SIZE) {
@@ -97,7 +99,7 @@ int main(int argc, char* argv[]) {
         }
         line[strcspn(line, "\n")] = 0;
 
-        // Validate CIDR format
+        // Validate CIDR
         char ip_str[INET_ADDRSTRLEN];
         int prefix_len;
         if (sscanf(line, "%[^/]/%d", ip_str, &prefix_len) != 2) {
@@ -119,13 +121,21 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        unsigned long long t1 = rdtsc();
         parse_cidr(line, &table[table_size++]);
+        unsigned long long t2 = rdtsc();
+        insert_total += (t2 - t1);
     }
     fclose(fp);
+    build_end = rdtsc();
 
     qsort(table, table_size, sizeof(RangeEntry), compare_entries);
 
-    // Convert IP address to uint32_t
+    // Display build and insert time
+    printf("Average Build Time: %.2f cycles\n", (double)(build_end - build_begin));
+    printf("Average Insert Time: %.2f cycles\n", table_size > 0 ? (double)insert_total / table_size : 0);
+
+    // Convert IP to search
     uint32_t query_ip;
     if (inet_pton(AF_INET, argv[2], &query_ip) != 1) {
         fprintf(stderr, "Invalid IP address\n");
@@ -133,17 +143,32 @@ int main(int argc, char* argv[]) {
     }
     query_ip = ntohl(query_ip);
 
-    // Run the BRS
-    begin = rdtsc();
+    // Average Search Time (100 random samples)
+    srand(time(NULL));
+    int sample_count = table_size < 100 ? table_size : 100;
+    for (int i = 0; i < sample_count; ++i) {
+        uint32_t random_ip = table[rand() % table_size].b_minus_1 + 1;
+        unsigned long long s1 = rdtsc();
+        binary_range_search(random_ip);
+        unsigned long long s2 = rdtsc();
+        search_total += (s2 - s1);
+    }
+
+    printf("Average Search Time: %.2f cycles\n", sample_count > 0 ? (double)search_total / sample_count : 0);
+    printf("Number Of Nodes: %d\n", table_size);
+    printf("Total memory requirement: %.2f KB\n", (double)(table_size * sizeof(RangeEntry)) / 1024.0);
+
+    // Execute user query IP
+    unsigned long long q1 = rdtsc();
     const char* result = binary_range_search(query_ip);
+    unsigned long long q2 = rdtsc();
+
     if (result) {
         printf("Matched prefix: %s\n", result);
     } else {
         printf("No match found.\n");
     }
-    end = rdtsc();
-
-    printf("Execution time: %llu cycles\n", end - begin);
+    printf("Query Execution Time: %llu cycles\n", q2 - q1);
 
     return 0;
 }

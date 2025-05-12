@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_LINE_LEN 128
 #define MAX_TABLE_SIZE 1000000
@@ -16,7 +17,13 @@ typedef struct {
 RangeEntry table[MAX_TABLE_SIZE];
 int table_size = 0;
 
-// 將 mask 長度轉成 in6_addr
+static __inline__ unsigned long long rdtsc(void) {
+    unsigned hi, lo;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)lo) | (((unsigned long long)hi) << 32);
+}
+
+
 void prefix_to_mask(int prefix_len, struct in6_addr* mask) {
     memset(mask, 0, sizeof(struct in6_addr));
     for (int i = 0; i < 16 && prefix_len > 0; i++) {
@@ -82,7 +89,6 @@ void parse_cidr(const char* cidr_str, RangeEntry* entry) {
     snprintf(entry->cidr, sizeof(entry->cidr), "%s", cidr_str);
 }
 
-// 比較 function
 int compare_entries(const void* a, const void* b) {
     return memcmp(&((RangeEntry*)a)->b_minus_1, &((RangeEntry*)b)->b_minus_1, sizeof(struct in6_addr));
 }
@@ -109,6 +115,10 @@ const char* binary_range_search(struct in6_addr* ip) {
 }
 
 int main(int argc, char* argv[]) {
+    unsigned long long insert_total = 0;
+    unsigned long long build_begin, build_end;
+    unsigned long long search_total = 0;
+
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <routing_table.txt> <IPv6_address>\n", argv[0]);
         return 1;
@@ -122,6 +132,8 @@ int main(int argc, char* argv[]) {
 
     char line[MAX_LINE_LEN];
     int line_number = 0;
+
+    build_begin = rdtsc();
     while (fgets(line, sizeof(line), fp)) {
         line_number++;
         if (table_size >= MAX_TABLE_SIZE) {
@@ -151,11 +163,18 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        unsigned long long t1 = rdtsc();
         parse_cidr(line, &table[table_size++]);
+        unsigned long long t2 = rdtsc();
+        insert_total += (t2 - t1);
     }
     fclose(fp);
+    build_end = rdtsc();
 
     qsort(table, table_size, sizeof(RangeEntry), compare_entries);
+
+    printf("Average Build Time: %.2f cycles\n", (double)(build_end - build_begin));
+    printf("Average Insert Time: %.2f cycles\n", table_size > 0 ? (double)insert_total / table_size : 0);
 
     struct in6_addr query_ip;
     if (inet_pton(AF_INET6, argv[2], &query_ip) != 1 || strchr(argv[2], '.') != NULL) {
@@ -163,12 +182,32 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    srand(time(NULL));
+    int sample_count = table_size < 100 ? table_size : 100;
+    for (int i = 0; i < sample_count; ++i) {
+        struct in6_addr ip = table[rand() % table_size].b_minus_1;
+        ip.s6_addr[15] += 1; // 往後一個 IP（保證在 (b-1, f] 之間）
+
+        unsigned long long s1 = rdtsc();
+        binary_range_search(&ip);
+        unsigned long long s2 = rdtsc();
+        search_total += (s2 - s1);
+    }
+
+    printf("Average Search Time: %.2f cycles\n", sample_count > 0 ? (double)search_total / sample_count : 0);
+    printf("Number Of Nodes: %d\n", table_size);
+    printf("Total memory requirement: %.2f KB\n", (double)(table_size * sizeof(RangeEntry)) / 1024.0);
+
+    unsigned long long q1 = rdtsc();
     const char* result = binary_range_search(&query_ip);
+    unsigned long long q2 = rdtsc();
+
     if (result) {
         printf("Matched prefix: %s\n", result);
     } else {
         printf("No match found.\n");
     }
+    printf("Query Execution Time: %llu cycles\n", q2 - q1);
 
     return 0;
 }
