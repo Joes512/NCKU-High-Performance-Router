@@ -3,24 +3,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_LINE_LEN 64
 #define MAX_TABLE_SIZE 1000000
 
-/* To calculate execution time.*/
-static __inline__ unsigned long long rdtsc(void)
-{
-  unsigned hi, lo;
-  __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
-  return ( (unsigned long long)lo)|( ((unsigned long long)hi)<<32 );
+static __inline__ unsigned long long rdtsc(void) {
+    unsigned hi, lo;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)lo) | (((unsigned long long)hi) << 32);
 }
-/* Calculate execution time end.*/
 
 typedef struct {
-    uint32_t prefix;       // Network address
-    uint8_t length;        // Prefix length (0-32)
-    char cidr[32];         // Original CIDR string (for output)
-    int is_auxiliary;      // Flag to indicate if this is an auxiliary prefix
+    uint32_t prefix;
+    uint8_t length;
+    char cidr[32];
+    int is_auxiliary;
 } PrefixEntry;
 
 PrefixEntry table[MAX_TABLE_SIZE];
@@ -53,7 +51,7 @@ int compare_prefixes(const void* a, const void* b) {
     const PrefixEntry* pb = (const PrefixEntry*)b;
 
     if (pa->prefix == pb->prefix) {
-        return pb->length - pa->length; // Longer prefix first
+        return pb->length - pa->length;
     }
     return (pa->prefix > pb->prefix) - (pa->prefix < pb->prefix);
 }
@@ -63,7 +61,7 @@ int match(uint32_t ip, uint32_t prefix, uint8_t length) {
     return mask_prefix(ip, length) == prefix;
 }
 
-// Insert auxiliary prefix (e.g., mid points) for full tree expansion
+// Insert auxiliary prefix
 void insert_auxiliary_prefix(uint32_t prefix, uint8_t length, const char* source_cidr) {
     if (table_size >= MAX_TABLE_SIZE) return;
     table[table_size].prefix = prefix;
@@ -73,33 +71,26 @@ void insert_auxiliary_prefix(uint32_t prefix, uint8_t length, const char* source
     table_size++;
 }
 
-// Full tree expansion & merge logic
+// Full tree expansion
 void full_tree_expand_and_merge() {
     int original_size = table_size;
     for (int i = 0; i < original_size; i++) {
         uint32_t prefix = table[i].prefix;
         uint8_t length = table[i].length;
 
-        // Calculate number of child prefixes (2^(32 - length))
-        uint32_t range = 1U << (32 - length);
         if (length == 32) continue;
-
-        // Step size for generating auxiliary prefixes (binary midpoint splitting)
+        uint32_t range = 1U << (32 - length);
         uint32_t step = range >> 1;
-
-        // Generate one auxiliary prefix from the middle
         uint32_t aux_prefix = prefix + step;
+
         insert_auxiliary_prefix(mask_prefix(aux_prefix, length + 1), length + 1, table[i].cidr);
     }
 }
 
-// Binary Prefix Search with enclosure handling
+// Binary Prefix Search with Enclosure
 const char* binary_prefix_search_enclosure(uint32_t ip, int L, int R) {
     if (L == R) {
-        if (match(ip, table[L].prefix, table[L].length)) {
-            return table[L].cidr;
-        }
-        return NULL;
+        return match(ip, table[L].prefix, table[L].length) ? table[L].cidr : NULL;
     }
     if (L + 1 == R) {
         if (table[L].length >= table[R].length) {
@@ -109,7 +100,7 @@ const char* binary_prefix_search_enclosure(uint32_t ip, int L, int R) {
             if (match(ip, table[R].prefix, table[R].length)) return table[R].cidr;
             if (match(ip, table[L].prefix, table[L].length)) return table[L].cidr;
         }
-        return NULL; // default port fallback could be added here
+        return NULL;
     }
 
     int M = (L + R) / 2;
@@ -123,12 +114,12 @@ const char* binary_prefix_search_enclosure(uint32_t ip, int L, int R) {
 }
 
 int main(int argc, char* argv[]) {
+    unsigned long long insert_total = 0, build_begin, build_end, search_total = 0;
+
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <routing_table.txt> <ip>\n", argv[0]);
         return 1;
     }
-
-    unsigned long long int begin, end;
 
     FILE* fp = fopen(argv[1], "r");
     if (!fp) {
@@ -138,6 +129,8 @@ int main(int argc, char* argv[]) {
 
     char line[MAX_LINE_LEN];
     int line_number = 0;
+
+    build_begin = rdtsc();
     while (fgets(line, sizeof(line), fp)) {
         line_number++;
         if (table_size >= MAX_TABLE_SIZE) {
@@ -167,13 +160,33 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        unsigned long long t1 = rdtsc();
         parse_cidr(line, &table[table_size++]);
+        unsigned long long t2 = rdtsc();
+        insert_total += (t2 - t1);
     }
     fclose(fp);
 
     full_tree_expand_and_merge();
-
     qsort(table, table_size, sizeof(PrefixEntry), compare_prefixes);
+    build_end = rdtsc();
+
+    printf("Average Build Time: %.2f cycles\n", (double)(build_end - build_begin));
+    printf("Average Insert Time: %.2f cycles\n", table_size > 0 ? (double)insert_total / table_size : 0);
+
+    srand(time(NULL));
+    int sample_count = table_size < 100 ? table_size : 100;
+    for (int i = 0; i < sample_count; ++i) {
+        uint32_t rand_ip = table[rand() % table_size].prefix + 1;
+        unsigned long long s1 = rdtsc();
+        binary_prefix_search_enclosure(rand_ip, 0, table_size - 1);
+        unsigned long long s2 = rdtsc();
+        search_total += (s2 - s1);
+    }
+
+    printf("Average Search Time: %.2f cycles\n", sample_count > 0 ? (double)search_total / sample_count : 0);
+    printf("Number Of Nodes: %d\n", table_size);
+    printf("Total memory requirement: %.2f KB\n", (double)(table_size * sizeof(PrefixEntry)) / 1024.0);
 
     uint32_t query_ip;
     if (inet_pton(AF_INET, argv[2], &query_ip) != 1) {
@@ -182,15 +195,16 @@ int main(int argc, char* argv[]) {
     }
     query_ip = ntohl(query_ip);
 
-    begin = rdtsc();
+    unsigned long long q1 = rdtsc();
     const char* result = binary_prefix_search_enclosure(query_ip, 0, table_size - 1);
+    unsigned long long q2 = rdtsc();
+
     if (result) {
         printf("Matched prefix: %s\n", result);
     } else {
         printf("No match found.\n");
     }
-    end = rdtsc();
-    printf("Execution time: %llu cycles\n", end - begin);
+    printf("Query Execution Time: %llu cycles\n", q2 - q1);
 
     return 0;
 }

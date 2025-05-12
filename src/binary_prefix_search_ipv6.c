@@ -3,15 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_LINE_LEN 128
 #define MAX_TABLE_SIZE 1000000
 
-static __inline__ unsigned long long rdtsc(void)
-{
-  unsigned hi, lo;
-  __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
-  return ((unsigned long long)lo) | (((unsigned long long)hi) << 32);
+static __inline__ unsigned long long rdtsc(void) {
+    unsigned hi, lo;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)lo) | (((unsigned long long)hi) << 32);
 }
 
 typedef struct {
@@ -53,8 +53,7 @@ int compare_prefixes(const void* a, const void* b) {
     const PrefixEntry* pa = (const PrefixEntry*)a;
     const PrefixEntry* pb = (const PrefixEntry*)b;
     int cmp = memcmp(&pa->prefix, &pb->prefix, sizeof(struct in6_addr));
-    if (cmp == 0) return pb->length - pa->length;
-    return cmp;
+    return (cmp != 0) ? cmp : (pb->length - pa->length);
 }
 
 int match(struct in6_addr* ip, struct in6_addr* prefix, uint8_t length) {
@@ -94,8 +93,7 @@ void full_tree_expand_and_merge() {
 
 const char* binary_prefix_search_enclosure(struct in6_addr* ip, int L, int R) {
     if (L == R) {
-        if (match(ip, &table[L].prefix, table[L].length)) return table[L].cidr;
-        return NULL;
+        return match(ip, &table[L].prefix, table[L].length) ? table[L].cidr : NULL;
     }
     if (L + 1 == R) {
         if (table[L].length >= table[R].length) {
@@ -116,12 +114,13 @@ const char* binary_prefix_search_enclosure(struct in6_addr* ip, int L, int R) {
 }
 
 int main(int argc, char* argv[]) {
+    unsigned long long build_begin, build_end, insert_total = 0, search_total = 0;
+
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <routing_table.txt> <ipv6>\n", argv[0]);
         return 1;
     }
 
-    unsigned long long int begin, end;
     FILE* fp = fopen(argv[1], "r");
     if (!fp) {
         perror("Failed to open routing table");
@@ -130,6 +129,8 @@ int main(int argc, char* argv[]) {
 
     char line[MAX_LINE_LEN];
     int line_number = 0;
+
+    build_begin = rdtsc();
     while (fgets(line, sizeof(line), fp)) {
         line_number++;
         if (table_size >= MAX_TABLE_SIZE) {
@@ -137,24 +138,52 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         line[strcspn(line, "\n")] = 0;
+        unsigned long long t1 = rdtsc();
         parse_cidr(line, &table[table_size++]);
+        unsigned long long t2 = rdtsc();
+        insert_total += (t2 - t1);
     }
     fclose(fp);
 
     full_tree_expand_and_merge();
     qsort(table, table_size, sizeof(PrefixEntry), compare_prefixes);
+    build_end = rdtsc();
 
+    printf("Average Build Time: %.2f cycles\n", (double)(build_end - build_begin));
+    printf("Average Insert Time: %.2f cycles\n", (table_size > 0) ? (double)insert_total / table_size : 0);
+
+    srand(time(NULL));
+    int sample_count = table_size < 100 ? table_size : 100;
+    for (int i = 0; i < sample_count; i++) {
+        struct in6_addr sample_ip = table[rand() % table_size].prefix;
+        sample_ip.s6_addr[15] += 1;  // 確保在 prefix 內部
+
+        unsigned long long s1 = rdtsc();
+        binary_prefix_search_enclosure(&sample_ip, 0, table_size - 1);
+        unsigned long long s2 = rdtsc();
+        search_total += (s2 - s1);
+    }
+    printf("Average Search Time: %.2f cycles\n", (sample_count > 0) ? (double)search_total / sample_count : 0);
+    printf("Number Of Nodes: %d\n", table_size);
+    printf("Total memory requirement: %.2f KB\n", (double)(table_size * sizeof(PrefixEntry)) / 1024.0);
+
+    // 真正查詢
     struct in6_addr query_ip;
     if (inet_pton(AF_INET6, argv[2], &query_ip) != 1) {
         fprintf(stderr, "Invalid IPv6 address\n");
         return 1;
     }
 
-    begin = rdtsc();
+    unsigned long long q1 = rdtsc();
     const char* result = binary_prefix_search_enclosure(&query_ip, 0, table_size - 1);
-    if (result) printf("Matched prefix: %s\n", result);
-    else printf("No match found.\n");
-    end = rdtsc();
-    printf("Execution time: %llu cycles\n", end - begin);
+    unsigned long long q2 = rdtsc();
+
+    if (result) {
+        printf("Matched prefix: %s\n", result);
+    } else {
+        printf("No match found.\n");
+    }
+    printf("Query Execution Time: %llu cycles\n", q2 - q1);
+
     return 0;
 }
