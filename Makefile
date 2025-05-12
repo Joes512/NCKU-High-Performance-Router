@@ -1,12 +1,12 @@
 CC = gcc
 CFLAGS = -O2 -Wall -std=c11
 
-SRCS := $(wildcard *.c)
+SRCS := $(wildcard src/*.c)
 BINS := $(SRCS:.c=)
 
 all: $(BINS)
 
-%: %.c
+%: src/%.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
